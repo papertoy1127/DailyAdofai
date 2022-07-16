@@ -10,8 +10,6 @@ using ADOFAI;
 using ByteSheep.Events;
 using GDMiniJSON;
 using HarmonyLib;
-using Mono.WebBrowser;
-using RDTools;
 using UnityEngine;
 using UnityEngine.Networking;
 using UnityEngine.UI;
@@ -60,12 +58,19 @@ namespace DailyAdofai {
 		public static void Postfix(scnCLS __instance) {
 			Data.dailyMode = false;
 			tileparent = GameObject.Find("initialPath").transform;
+			var deletedFirst = false;
 			foreach (Transform transform in tileparent) {
 				if (transform.name != "tile") continue;
 				if (tileprefab == null) {
 					tileprefab = transform.GetComponent<scrFloor>();
 				} else {
-					Object.Destroy(transform.gameObject);
+					if (!deletedFirst) {
+						Object.Destroy(transform.gameObject);
+						deletedFirst = true;
+						continue;
+					}
+					var spriteRenderer = transform.GetComponent<SpriteRenderer>();
+					spriteRenderer.color = new Color(0, 0, 0, 0);
 				}
 			}
 
@@ -166,7 +171,7 @@ namespace DailyAdofai {
 	[HarmonyPatch(typeof(scrCamera), "Update")]
 	internal static class CameraUpdatePatch {
 		public static void Prefix(scrCamera __instance) {
-			if (!__instance.isLevelEditor || !__instance.controller.paused || !__instance.followMode) {
+			if (!ADOBase.isLevelEditor || !ADOBase.controller.paused || !__instance.followMode) {
 				if (!GCS.d_freeroam && !Input.GetKey(KeyCode.Minus) && !Input.GetKey(KeyCode.Equals)) {
 					if (__instance.positionState == (PositionState) 100) {
 						__instance.topos.y = 0f;
@@ -188,7 +193,8 @@ namespace DailyAdofai {
 			var featuredLevelsMode = cls.get<bool>("featuredLevelsMode");
 			var isWorkshopLevel = cls.get<Dictionary<string, bool>>("isWorkshopLevel");
 			var loadedLevelIsDeleted = cls.get<Dictionary<string, bool>>("loadedLevelIsDeleted");
-			var loadedLevels = cls.get<Dictionary<string, LevelDataCLS>>("loadedLevels");
+			var loadedLevels = cls.get<Dictionary<string, GenericDataCLS>>("loadedLevels");
+			var extraLevels = cls.get<Dictionary<string, GenericDataCLS>>("extraLevels");
 			var loadedLevelDirs = cls.get<Dictionary<string, string>>("loadedLevelDirs");
 			
 			if (local && !Directory.Exists(levelsDir)) {
@@ -196,10 +202,10 @@ namespace DailyAdofai {
 				RDDirectory.CreateDirectory(levelsDir);
 			} else {
 				if (featuredLevelsMode) {
-					foreach (var keyValuePair in cls.get<Dictionary<string, LevelDataCLS>>("extraLevels")) {
-						string key = keyValuePair.Key;
+					foreach (var extraLevel in extraLevels) {
+						string key = extraLevel.Key;
 						if (!loadedLevels.ContainsKey(key)) {
-							loadedLevels.Add(key, keyValuePair.Value);
+							loadedLevels.Add(key, extraLevel.Value);
 							loadedLevelDirs.Add(key, null);
 							loadedLevelIsDeleted[key] = false;
 							isWorkshopLevel[key] = true;
@@ -216,63 +222,59 @@ namespace DailyAdofai {
 						}
 					}
 				} else {
-					string[] array = Array.Empty<string>();
+					string[] second = Array.Empty<string>();
 					string[] first = Array.Empty<string>();
 					if (workshop) {
-						array = new string[SteamWorkshop.resultItems.Count];
-						for (int i = 0; i < SteamWorkshop.resultItems.Count; i++) {
-							array[i] = SteamWorkshop.resultItems[i].path;
-							isWorkshopLevel[Path.GetFileName(array[i])] = true;
+						second = new string[SteamWorkshop.resultItems.Count];
+						for (int index = 0; index < SteamWorkshop.resultItems.Count; ++index) {
+							second[index] = SteamWorkshop.resultItems[index].path;
+							isWorkshopLevel[Path.GetFileName(second[index])] = true;
 						}
 					}
 
-					if (local) {
+					if (local)
 						first = Directory.GetDirectories(levelsDir);
-					}
-
-					string[] itemDirs = first.Concat(array).ToArray<string>();
+					string[] itemDirs = first.Concat(second)
+						.ToArray();
 					cancelToken.ThrowIfCancellationRequested();
-					var list = new List<Task<Dictionary<string, object>>>();
-					string[] array2 = itemDirs;
-					for (int j = 0; j < array2.Length; j++) {
-						string text = array2[j];
-						string levelPath = Path.Combine(text, "main.adofai");
-						string fileName = Path.GetFileName(text);
+					List<Task<Dictionary<string, object>>> taskList = new List<Task<Dictionary<string, object>>>();
+					foreach (string str in itemDirs) {
+						string levelPath = Path.Combine(str, "main.adofai");
+						string fileName = Path.GetFileName(str);
 						bool flag = false;
-						if (loadedLevelIsDeleted.ContainsKey(fileName)) {
+						if (loadedLevelIsDeleted.ContainsKey(fileName))
 							flag = loadedLevelIsDeleted[fileName];
-						}
-
-						if (RDFile.Exists(levelPath) && !flag) {
-							list.Add(Task.Run<Dictionary<string, object>>(
+						if (RDFile.Exists(levelPath) && !flag)
+							taskList.Add(Task.Run(
 								() =>
-									Json.Deserialize(RDFile.ReadAllText(levelPath, null)) as Dictionary<string, object>,
+									Json.Deserialize(RDFile.ReadAllText(levelPath)) as Dictionary<string, object>,
 								cancelToken));
-						} else if (!flag) {
-							Debug.LogWarning("No level file at " + text + "!");
-							list.Add(Task.FromResult<Dictionary<string, object>>(null));
+						else if (!flag) {
+							Debug.LogWarning("No level file at " + str + "!");
+							taskList.Add(
+								Task.FromResult((Dictionary<string, object>) null));
 						}
 					}
 
 					cancelToken.ThrowIfCancellationRequested();
-					var array3 = await Task.WhenAll<Dictionary<string, object>>(list);
+					Dictionary<string, object>[] dictionaryArray =
+						await Task.WhenAll(
+							taskList);
 					cancelToken.ThrowIfCancellationRequested();
-					for (int k = 0; k < itemDirs.Length; k++) {
-						string text2 = itemDirs[k];
-						string fileName2 = Path.GetFileName(text2);
-						var dictionary = array3[k];
-						if (dictionary != null) {
-							var levelDataCLS = new LevelDataCLS();
-							levelDataCLS.Setup();
-							if (levelDataCLS.Decode(dictionary)) {
-								loadedLevels.Add(fileName2, levelDataCLS);
-								loadedLevelDirs.Add(fileName2, text2);
-								loadedLevelIsDeleted[fileName2] = false;
+					for (int index = 0; index < itemDirs.Length; ++index) {
+						string path = itemDirs[index];
+						string fileName = Path.GetFileName(path);
+						Dictionary<string, object> rootDict = dictionaryArray[index];
+						if (rootDict != null) {
+							LevelDataCLS levelDataCls = new LevelDataCLS();
+							levelDataCls.Setup();
+							if (levelDataCls.Decode(rootDict)) {
+								loadedLevels.Add(fileName, levelDataCls);
+								loadedLevelDirs.Add(fileName, path);
+								loadedLevelIsDeleted[fileName] = false;
 							}
 						}
 					}
-
-					itemDirs = null;
 				}
 
 				cls.levelCount = loadedLevels.Count;
